@@ -5,19 +5,18 @@ using UnityEngine.AI;
 
 public class HeadHunterNME : MonoBehaviour
 {
-    #region Components
+    #region Variables
 
+    //Components
     [HideInInspector] public StateMachine stateMachine;
     [HideInInspector] public Transform tr;
     [HideInInspector] public NavMeshAgent agent;
     [HideInInspector] public Animator animator;
     [HideInInspector] public Transform targetPlayerTr;
+    [HideInInspector] public SoundRelay soundRelay;
 
-    #endregion
-
-    #region Pathing
-
-    [Header("Drag the Path script here")]
+    //Pathing
+    [Header("Drag the Path script here, no path = idle")]
     public PathObject pathObject;
     [HideInInspector] public float distanceToTurn = 1f;
     [HideInInspector] public Transform[] path;
@@ -26,10 +25,7 @@ public class HeadHunterNME : MonoBehaviour
     [HideInInspector] public Vector3 startPos;
     [HideInInspector] public Quaternion startRot;
 
-    #endregion
-
-    #region States
-
+    //States
     [HideInInspector] public HeadHunterIdle idle;
     [HideInInspector] public HeadHunterPatrol patrol;
     [HideInInspector] public HeadHunterChase chase;
@@ -37,22 +33,28 @@ public class HeadHunterNME : MonoBehaviour
     [HideInInspector] public HeadHunterStunned stunned;
     [HideInInspector] public HeadHunterSearchInPlace searchInPlace;
     [HideInInspector] public HeadHunterDoor door;
-
-    #endregion
+    [HideInInspector] public HeadHunterTurnInPlace turn;
 
     [HideInInspector] public Transform langueTr;
-
+    [Header("Illusion de trick?")]
+    public bool isIllusion = false;
     public bool debug = false;
 
-    #region Detection
-
-    public List<Transform> visibleTargets = new List<Transform>();
+    //Detection
+    [HideInInspector] public List<Transform> visibleTargets = new List<Transform>();
     private LayerMask playerMask;
     private LayerMask obstaclesMask;
-    [Range(2.0f, 20.0f)] public float fovRadius = 5.0f;
-    [Range(0.0f, 360.0f)] public float viewAngle = 70.0f;
-    public bool playerDetected = false;
+    [HideInInspector] [Range(2.0f, 20.0f)] public float fovRadius = 5.0f;
+    [HideInInspector] [Range(0.0f, 360.0f)] public float viewAngle = 70.0f;
+    [HideInInspector] public bool playerDetected = false;
     [HideInInspector] public float killDistance = 3f;
+    [HideInInspector] public float turnThreshold = 80f;
+    [HideInInspector] RaycastHit hit;
+    private Collider[] targetsInRadius;
+    private Transform target;
+
+    //Fxs
+    public List<Material> headHunterMats = new List<Material>();
 
     #endregion
 
@@ -71,10 +73,10 @@ public class HeadHunterNME : MonoBehaviour
         animator = GetComponent<Animator>();
         playerMask = LayerMask.GetMask("Player");
         obstaclesMask = LayerMask.GetMask("Obstacles");
+        soundRelay = GetComponent<SoundRelay>();
         startPos = tr.position;
         startRot = tr.rotation;
         langueTr = langueTr.transform;
-
 
         idle = new HeadHunterIdle(this);
         patrol = new HeadHunterPatrol(this);
@@ -83,6 +85,7 @@ public class HeadHunterNME : MonoBehaviour
         stunned = new HeadHunterStunned(this);
         searchInPlace = new HeadHunterSearchInPlace(this);
         door = new HeadHunterDoor(this);
+        turn = new HeadHunterTurnInPlace(this);
 
         if (pathObject != null)
         {
@@ -95,7 +98,7 @@ public class HeadHunterNME : MonoBehaviour
     private void Update()
     {
         //Update la state machine
-        if(Time.timeScale != 0f)
+        if (Time.timeScale != 0f)
             stateMachine.CurrentStateUpdate();
 
         if (debug)
@@ -104,7 +107,7 @@ public class HeadHunterNME : MonoBehaviour
 
     #endregion
 
-    #region Fonctions Pathing
+    #region  Pathing
 
     ///<summary> Update le path à la prochaine destination, loop du dernier au premier point. </summary>
     public void UpdatePath()
@@ -118,7 +121,7 @@ public class HeadHunterNME : MonoBehaviour
     public int CheckClosestDestination()
     {
         int closestDistance = 0;
-        for(int i = 0; i < path.Length; i++)
+        for (int i = 0; i < path.Length; i++)
         {
             if (Vector3.Distance(tr.position, path[i].position) < Vector3.Distance(tr.position, path[closestDistance].position))
                 closestDistance = i;
@@ -137,32 +140,53 @@ public class HeadHunterNME : MonoBehaviour
         agent.SetDestination(path[CheckClosestDestination()].position);
     }
 
+    ///<summary> Ajuste la vitesse de l'agent en fonction de l'animation </summary>
+    private void OnAnimatorMove()
+    {
+        if (Time.deltaTime != 0f) // Bugfix when unpausing de game
+            agent.speed = animator.deltaPosition.magnitude / Time.deltaTime;
+        else
+            agent.speed = animator.deltaPosition.magnitude;
+
+        tr.rotation = animator.rootRotation;
+    }
+
+    public void ResetPos()
+    {
+        tr.position = startPos;
+    }
+
     #endregion
 
-    #region Fonctions Detection
+    #region  Detection
 
     ///<summary> Detection du player </summary>
     public void LookForPlayer()
     {
-        visibleTargets.Clear();
-        Collider[] targetsInRadius = Physics.OverlapSphere(tr.position, fovRadius, playerMask);
-        for (int i = 0; i < targetsInRadius.Length; i++)
+        if (GameManager.instance.currentAvatar != null)
         {
-            Transform target = targetsInRadius[i].transform;
-            Vector3 dirToTarget = (target.position - tr.position).normalized;
-            if (Vector3.Angle(tr.forward, dirToTarget) < viewAngle / 2)
+            if (GameManager.instance.currentAvatar.stateMachine.currentState != GameManager.instance.currentAvatar.stateMachine.death)
             {
-                float dstToTarget = Vector3.Distance(tr.position, target.position);
-                if (!Physics.Raycast(tr.position, dirToTarget, dstToTarget, obstaclesMask))
+                visibleTargets.Clear();
+                targetsInRadius = Physics.OverlapSphere(tr.position, fovRadius, playerMask);
+                for (int i = 0; i < targetsInRadius.Length; i++)
                 {
-                    if (GameManager.instance.currentAvatar.tr.position.y - tr.position.y <= 2.5f)
+                    target = targetsInRadius[i].transform;
+                    if (Vector3.Angle(tr.forward, (target.position - tr.position).normalized) < viewAngle / 2)
                     {
-                        visibleTargets.Add(target);
-                        targetPlayerTr = target;
+                        Debug.DrawLine(tr.position + Vector3.up * 1.5f, target.position + Vector3.up * (GameManager.instance.currentAvatar.controller.height - 0.5f), Color.red);
+                        if (Physics.Linecast(tr.position + Vector3.up * 1.5f, target.position + Vector3.up * (GameManager.instance.currentAvatar.controller.height - 0.5f), out hit))
+                        {
+                            if (hit.collider.gameObject.CompareTag("Player") && GameManager.instance.currentAvatar.tr.position.y - tr.position.y <= 2.5f)
+                            {
+                                visibleTargets.Add(target);
+                                targetPlayerTr = target;
 
-                        playerDetected = true;
-                        CancelInvoke();
-                        Invoke("PlayerBecomesUndetected", 2.0f);
+                                playerDetected = true;
+                                CancelInvoke();
+                                Invoke("PlayerBecomesUndetected", 2.0f);
+                            }
+                        }
                     }
                 }
             }
@@ -176,14 +200,17 @@ public class HeadHunterNME : MonoBehaviour
         {
             Vector3 dirToTarget = (other.transform.position - tr.position).normalized;
             float dstToTarget = Vector3.Distance(tr.position, other.transform.position);
-            if (!Physics.Raycast(tr.position, dirToTarget, dstToTarget, obstaclesMask))
+            if (Physics.Linecast(tr.position + Vector3.up * 1.5f, target.position + Vector3.up * (GameManager.instance.currentAvatar.controller.height - 0.5f), out hit))
             {
-                visibleTargets.Add(other.transform);
-                targetPlayerTr = other.transform;
+                if (hit.collider.gameObject.CompareTag("Player") && GameManager.instance.currentAvatar.tr.position.y - tr.position.y <= 2.5f)
+                {
+                    visibleTargets.Add(other.transform);
+                    targetPlayerTr = other.transform;
 
-                playerDetected = true;
-                CancelInvoke();
-                Invoke("PlayerBecomesUndetected", 2.0f);
+                    playerDetected = true;
+                    CancelInvoke();
+                    Invoke("PlayerBecomesUndetected", 2.0f);
+                }
             }
         }
     }
@@ -195,11 +222,16 @@ public class HeadHunterNME : MonoBehaviour
 
     #endregion
 
-    #region Fonctions FX
+    #region  FX
 
     public void PlayFx(AnimationEvent animation)
     {
         GameManager.instance.fxPool.GetObjectAutoReturn(animation.stringParameter, tr.position, tr.eulerAngles, animation.floatParameter);
+    }
+
+    public void PlayFx(string name, float time)
+    {
+        GameManager.instance.fxPool.GetObjectAutoReturn(name, tr.position, tr.eulerAngles, time);
     }
 
     public void PlayFxLangue(AnimationEvent animation)
@@ -207,19 +239,10 @@ public class HeadHunterNME : MonoBehaviour
         GameManager.instance.fxPool.GetObjectAutoReturn(animation.stringParameter, langueTr.position, tr.eulerAngles, animation.floatParameter);
     }
 
+    public void PlayFootStepSound()
+    {
+        soundRelay.PlayAudioClip(1);
+    }
     #endregion
 
-    ///<summary> Ajuste la vitesse de l'agent en fonction de l'animation </summary>
-    private void OnAnimatorMove()
-    {
-        if (Time.deltaTime != 0f) // Bugfix when unpausing de game
-            agent.speed = animator.deltaPosition.magnitude / Time.deltaTime;
-        else
-            agent.speed = animator.deltaPosition.magnitude;
-    }
-
-    public void ResetPos()
-    {
-        tr.position = startPos;
-    }
 }
