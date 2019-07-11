@@ -88,11 +88,11 @@ public class HeadHunterNME : MonoBehaviour
         turn = new HeadHunterTurnInPlace(this);
 
         if (pathObject != null)
-        {
             GetPath();
-        }
 
         stateMachine.currentState = idle;
+
+        animator.applyRootMotion = false;
     }
 
     private void Update()
@@ -137,16 +137,23 @@ public class HeadHunterNME : MonoBehaviour
         {
             path[i] = pathObject.wayPoints[i].transform;
         }
-        agent.SetDestination(path[CheckClosestDestination()].position);
+        if(agent.enabled)
+            agent.SetDestination(path[CheckClosestDestination()].position);
     }
 
     ///<summary> Ajuste la vitesse de l'agent en fonction de l'animation </summary>
+    
     private void OnAnimatorMove()
     {
-        if (Time.deltaTime != 0f) // Bugfix when unpausing de game
-            agent.speed = animator.deltaPosition.magnitude / Time.deltaTime;
+        if (agent.enabled)
+        {
+            if (Time.deltaTime != 0f) // Bugfix when unpausing de game
+                agent.speed = animator.deltaPosition.magnitude / Time.deltaTime;
+            else
+                agent.speed = animator.deltaPosition.magnitude;
+        }
         else
-            agent.speed = animator.deltaPosition.magnitude;
+            tr.position = animator.rootPosition;
 
         tr.rotation = animator.rootRotation;
     }
